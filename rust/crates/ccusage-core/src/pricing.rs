@@ -1923,6 +1923,7 @@ impl PricingMap {
 
     fn put_builtin_entry(&mut self, model: String, pricing: Pricing) {
         self.entries.entry(model).or_insert(pricing);
+        self.clear_find_cache();
     }
 
     /// z.ai's catalog needs one provider fact LiteLLM does not publish: GLM
@@ -1947,6 +1948,7 @@ impl PricingMap {
                 slot.insert(pricing);
             }
         }
+        self.clear_find_cache();
     }
 
     /// Last-resort rates for models ccusage must always price, used only when
@@ -3445,6 +3447,42 @@ mod tests {
             .expect("the normalized primary entry should resolve");
         assert_eq!(resolved.input, 0.000009);
         assert_eq!(resolved.output, 0.000010);
+    }
+
+    #[test]
+    fn exact_fallback_lookup_returns_none_for_ambiguous_normalized_spellings() {
+        // `acme-alpha-1.5` and `acme.alpha@1.5` both normalize to
+        // `acme-alpha-1-5`. Neither raw key equals the queried spelling, so the
+        // normalized index decides - and two entries sharing a spelling must
+        // resolve to None rather than picking one arbitrarily. Inserting the
+        // colliding entry after the first lookup also proves mutations rebuild
+        // the index instead of serving the stale single-entry answer.
+        let mut pricing = PricingMap::default();
+        pricing.put_builtin_entry(
+            "acme-alpha-1.5".to_string(),
+            Pricing {
+                input: 1e-6,
+                ..Pricing::empty()
+            },
+        );
+
+        let resolved = pricing
+            .find_exact_with_fallback("acme-alpha-1-5")
+            .expect("a single normalized match should resolve");
+        assert_eq!(resolved.input, 1e-6);
+
+        pricing.put_builtin_entry(
+            "acme.alpha@1.5".to_string(),
+            Pricing {
+                input: 2e-6,
+                ..Pricing::empty()
+            },
+        );
+
+        assert!(
+            pricing.find_exact_with_fallback("acme-alpha-1-5").is_none(),
+            "two entries sharing one normalized spelling must not resolve"
+        );
     }
 
     #[test]
