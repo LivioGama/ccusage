@@ -423,6 +423,12 @@ pub struct PricingMap {
     enable_models_dev_fallback: bool,
     enable_embedded_models_dev_fallback: bool,
     find_cache: OnceLock<Mutex<FxHashMap<String, Option<Pricing>>>>,
+    /// Lazily-built index of normalized entry spellings for
+    /// [`Self::find_exact_normalized`]. `None` marks a spelling two or more
+    /// entries share, which names neither — the same answer the previous full
+    /// table scan gave when its second match existed. Rebuilt after any
+    /// mutation via [`Self::clear_find_cache`].
+    normalized_index: Mutex<Option<FxHashMap<String, Option<Pricing>>>>,
 }
 
 /// The ids of [`PricingMap::exact_only`], indexed both as written and under the
@@ -517,6 +523,7 @@ impl Default for PricingMap {
             enable_models_dev_fallback: false,
             enable_embedded_models_dev_fallback: false,
             find_cache: OnceLock::new(),
+            normalized_index: Mutex::new(None),
         }
     }
 }
@@ -1466,11 +1473,21 @@ impl PricingMap {
             }
 
             let normalized_model = normalized_pricing_key(model);
-            let mut matches = self.entries.iter().filter(|(candidate, _)| {
-                normalized_pricing_key(candidate).as_ref() == normalized_model.as_ref()
+            let mut guard = self
+                .normalized_index
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let index = guard.get_or_insert_with(|| {
+                let mut index = FxHashMap::default();
+                for (key, pricing) in &self.entries {
+                    index
+                        .entry(normalized_pricing_key(key).into_owned())
+                        .and_modify(|slot| *slot = None)
+                        .or_insert(Some(*pricing));
+                }
+                index
             });
-            let (_, pricing) = matches.next()?;
-            matches.next().is_none().then_some(*pricing)
+            index.get(normalized_model.as_ref()).copied().flatten()
         })
     }
 
@@ -1843,6 +1860,10 @@ impl PricingMap {
             let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
             guard.clear();
         }
+        *self
+            .normalized_index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
     }
 
     #[cfg(test)]
